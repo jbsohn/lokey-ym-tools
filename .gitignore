@@ -1,0 +1,19 @@
+# Cargo / Rust build artifacts
+/target/
+
+# Generated backup files
+**/*.rs.bk
+
+# IDE and Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Local environment / secrets (if applicable)
+.env

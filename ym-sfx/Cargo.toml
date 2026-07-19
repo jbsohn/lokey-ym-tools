@@ -1,0 +1,10 @@
+[package]
+name = "ym-sfx"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ym-core = { path = "../ym-core" }
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
