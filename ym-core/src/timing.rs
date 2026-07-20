@@ -25,6 +25,7 @@ impl SystemHz {
 
 /// Timing configuration for YM-2149 sound generation and playback.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TimingConfig {
     pub master_clock_hz: u32,
     pub frame_rate: SystemHz,

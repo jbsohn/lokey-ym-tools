@@ -8,3 +8,6 @@ ym-core = { path = "../ym-core" }
 serde.workspace = true
 serde_json.workspace = true
 clap.workspace = true
+ym2149.workspace = true
+cpal.workspace = true
+

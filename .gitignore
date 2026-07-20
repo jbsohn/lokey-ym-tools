@@ -17,3 +17,5 @@ Thumbs.db
 
 # Local environment / secrets (if applicable)
 .env
+.yfx
+.ysg

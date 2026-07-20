@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::fs;
 use std::path::PathBuf;
-use ym_core::{DeltaCompiler, SystemHz, YmSequence};
+use ym_core::{AudioPlayer, DeltaCompiler, SystemHz, YmSequence};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -10,30 +10,30 @@ use ym_core::{DeltaCompiler, SystemHz, YmSequence};
     about = "YM-2149 Music Compilation & Auditioning Toolchain",
     long_about = None
 )]
-struct Cli {
+struct SongCli {
     #[command(subcommand)]
-    command: Commands,
+    command: SongCommands,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-enum HzOption {
+enum SongHzOption {
     #[value(name = "50")]
     Hz50,
     #[value(name = "60")]
     Hz60,
 }
 
-impl From<HzOption> for SystemHz {
-    fn from(opt: HzOption) -> Self {
+impl From<SongHzOption> for SystemHz {
+    fn from(opt: SongHzOption) -> Self {
         match opt {
-            HzOption::Hz50 => SystemHz::Hz50,
-            HzOption::Hz60 => SystemHz::Hz60,
+            SongHzOption::Hz50 => SystemHz::Hz50,
+            SongHzOption::Hz60 => SystemHz::Hz60,
         }
     }
 }
 
 #[derive(Subcommand, Debug)]
-enum Commands {
+enum SongCommands {
     /// Render a music song file into compiled YM-2149 binary stream
     Render {
         /// Input music source file path (.json, etc.)
@@ -46,7 +46,15 @@ enum Commands {
 
         /// Timing refresh rate override (50 or 60 Hz)
         #[arg(long, value_enum)]
-        hz: Option<HzOption>,
+        hz: Option<SongHzOption>,
+
+        /// Frame step (downsample rate: e.g. 2 to skip every other frame)
+        #[arg(short, long, default_value_t = 1)]
+        step: usize,
+
+        /// Maximum frames to process (cuts off song after this limit)
+        #[arg(short, long)]
+        max_frames: Option<usize>,
     },
     /// Audition and play a music song file or stream
     Play {
@@ -56,30 +64,79 @@ enum Commands {
 
         /// Timing refresh rate override (50 or 60 Hz)
         #[arg(long, value_enum)]
-        hz: Option<HzOption>,
+        hz: Option<SongHzOption>,
     },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+    let cli = SongCli::parse();
 
     match cli.command {
-        Commands::Render { input, output, hz } => {
+        SongCommands::Render {
+            input,
+            output,
+            hz,
+            step,
+            max_frames,
+        } => {
             let output_path = output.unwrap_or_else(|| {
                 let mut path = input.clone();
-                path.set_extension("ym");
+                path.set_extension("ysg");
                 path
             });
 
-            let content = fs::read_to_string(&input)?;
-            let mut sequence: YmSequence = serde_json::from_str(&content)?;
+            let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+            let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
+
+            let mut sequence = if extension.eq_ignore_ascii_case("ym") {
+                let bytes = fs::read(&input)?;
+                YmSequence::from_ym_data(name, &bytes)?
+            } else {
+                let content = fs::read_to_string(&input)?;
+                serde_json::from_str(&content)?
+            };
+
+            // Apply frame limit and step decimation
+            let limit = max_frames
+                .unwrap_or(sequence.frames.len())
+                .min(sequence.frames.len());
+            let mut decimated_frames = Vec::new();
+            let mut i = 0;
+            while i < limit {
+                let window_end = (i + step).min(limit);
+                let mut final_frame = sequence.frames[i].clone();
+
+                // Peak volume detector over the step window
+                let mut max_vol_a = 0u8;
+                let mut max_vol_b = 0u8;
+                let mut max_vol_c = 0u8;
+
+                for idx in i..window_end {
+                    let f = &sequence.frames[idx];
+                    max_vol_a = max_vol_a.max(f.volume_a.unwrap_or(0));
+                    max_vol_b = max_vol_b.max(f.volume_b.unwrap_or(0));
+                    max_vol_c = max_vol_c.max(f.volume_c.unwrap_or(0));
+                }
+
+                final_frame.volume_a = Some(max_vol_a);
+                final_frame.volume_b = Some(max_vol_b);
+                final_frame.volume_c = Some(max_vol_c);
+
+                decimated_frames.push(final_frame);
+                i += step;
+            }
+            sequence.frames = decimated_frames;
 
             if let Some(hz_override) = hz {
                 sequence.timing.frame_rate = hz_override.into();
+            } else if step > 1 {
+                let current_hz = sequence.timing.frame_rate.hz_value();
+                sequence.timing.frame_rate =
+                    ym_core::timing::SystemHz::Custom(current_hz / step as u32);
             }
 
             let compiler = DeltaCompiler::new();
-            let binary = compiler.compile(&sequence);
+            let binary = compiler.compile_song(&sequence);
 
             fs::write(&output_path, &binary)?;
             println!(
@@ -90,16 +147,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sequence.timing.frame_rate.hz_value()
             );
         }
-        Commands::Play { input, hz } => {
-            let hz_str = hz
-                .map(|h| format!("{} Hz", SystemHz::from(h).hz_value()))
-                .unwrap_or_else(|| "Default Hz".to_string());
-            println!(
-                "SONG PLAY AUDITION: Loading {} for playback (Rate: {})...",
-                input.display(),
-                hz_str
-            );
-            // Music engine playback integration point
+        SongCommands::Play { input, hz } => {
+            let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+
+            if extension == "json" {
+                let content = fs::read_to_string(&input)?;
+                let mut sequence: YmSequence = serde_json::from_str(&content)?;
+
+                if let Some(hz_override) = hz {
+                    sequence.timing.frame_rate = hz_override.into();
+                }
+
+                println!(
+                    "SONG PLAY AUDITION: Playing {} (Rate: {} Hz)...",
+                    input.display(),
+                    sequence.timing.frame_rate.hz_value()
+                );
+
+                AudioPlayer::play(&sequence)?;
+            } else if extension == "ysg" {
+                let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
+                let bytes = fs::read(&input)?;
+                let mut sequence = YmSequence::from_ysg(name, &bytes)?;
+
+                if let Some(hz_override) = hz {
+                    sequence.timing.frame_rate = hz_override.into();
+                }
+
+                println!(
+                    "SONG PLAY AUDITION: Playing compiled song {} (Rate: {} Hz)...",
+                    input.display(),
+                    sequence.timing.frame_rate.hz_value()
+                );
+
+                AudioPlayer::play(&sequence)?;
+            } else {
+                println!(
+                    "SONG PLAY AUDITION: Playing chiptune song {}...",
+                    input.display()
+                );
+                let ym_data = fs::read(&input)?;
+                AudioPlayer::play_ym_data(&ym_data)?;
+            }
         }
     }
 
