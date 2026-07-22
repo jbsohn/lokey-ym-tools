@@ -4,6 +4,14 @@ use crate::sequence::{SfxSequence, YmSequence};
 #[derive(Debug, Default)]
 pub struct DeltaCompiler;
 
+/// Result of [`DeltaCompiler::compile_song`]: the compiled YSG payload plus the
+/// pattern size it chose, so callers can report or log it as they see fit.
+#[derive(Debug, Clone)]
+pub struct SongCompilation {
+    pub bytes: Vec<u8>,
+    pub pattern_size: usize,
+}
+
 impl DeltaCompiler {
     pub fn new() -> Self {
         Self
@@ -62,7 +70,7 @@ impl DeltaCompiler {
 
     /// Compiles a music song sequence into a pattern-deduplicated YSG binary payload,
     /// automatically searching for the pattern size that yields the smallest binary.
-    pub fn compile_song(&self, sequence: &YmSequence) -> Vec<u8> {
+    pub fn compile_song(&self, sequence: &YmSequence) -> SongCompilation {
         let sizes = [16, 32, 48, 64, 80, 96, 128, 160, 192, 255];
         let mut best_data: Option<Vec<u8>> = None;
         let mut best_size = 64;
@@ -76,18 +84,16 @@ impl DeltaCompiler {
             }
         }
 
-        let final_data = best_data.unwrap_or_else(|| {
+        let bytes = best_data.unwrap_or_else(|| {
             // fallback if all trials failed (e.g. song too long for small sizes)
             self.compile_song_with_size(sequence, 64)
                 .unwrap_or_default()
         });
 
-        println!(
-            "Pattern size optimization: chose best size {} (final size: {} bytes)",
-            best_size,
-            final_data.len()
-        );
-        final_data
+        SongCompilation {
+            bytes,
+            pattern_size: best_size,
+        }
     }
 
     pub fn compile_song_with_size(
@@ -161,11 +167,16 @@ impl DeltaCompiler {
             None => 255, // 255 means no loop
         };
 
-        let mut output = Vec::new();
-        output.push(pattern_size as u8);
-        output.push(num_unique as u8);
-        output.push(seq_len as u8);
-        output.push(loop_pattern);
+        let mut output = vec![
+            pattern_size as u8,
+            num_unique as u8,
+            seq_len as u8,
+            loop_pattern,
+        ];
+        // Frame rate and master clock, so playback can reconstruct the actual
+        // compiled timing instead of assuming defaults (see `from_ysg`).
+        output.extend(sequence.timing.frame_rate.hz_value().to_le_bytes());
+        output.extend(sequence.timing.master_clock_hz.to_le_bytes());
 
         // Sequence Table
         output.extend(&sequence_table);
@@ -254,9 +265,7 @@ impl DeltaCompiler {
             if idx == 0 {
                 // First frame writes ALL registers
                 mask = 0x3FFF;
-                for r in 0..14 {
-                    payload.push(new_registers[r]);
-                }
+                payload.extend_from_slice(&new_registers);
             } else {
                 // Delta from previous frame
                 for r in 0..14 {

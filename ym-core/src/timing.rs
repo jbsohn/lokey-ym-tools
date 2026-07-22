@@ -17,10 +17,24 @@ impl SystemHz {
             SystemHz::Custom(hz) => *hz,
         }
     }
-
+    
     pub fn frame_duration_ms(&self) -> f64 {
         1000.0 / (self.hz_value() as f64)
     }
+}
+
+/// Computes 6502 PHI2 busy-wait delay-loop constants for hitting a target
+/// playback rate on real Atari 7800 hardware (1.789773 MHz clock): an outer
+/// loop count (`y`, ~1285 cycles/iteration) and a fine-tune inner loop count
+/// (`x`, ~5 cycles/iteration), after subtracting a fixed ~1800-cycle
+/// per-frame processing overhead. Ported from the original C# player-tuning
+/// tool's `CalculateDelay`.
+pub fn calculate_delay(hz: u32) -> (u32, u8) {
+    let remaining = (1_789_773.0 / hz as f64 - 1800.0).max(0.0);
+    let y_raw = (remaining / 1285.0).floor();
+    let x = ((remaining - y_raw * 1285.0) / 5.0).round().clamp(0.0, 255.0) as u8;
+    let y = (y_raw as u32).max(1);
+    (y, x)
 }
 
 /// Timing configuration for YM-2149 sound generation and playback.

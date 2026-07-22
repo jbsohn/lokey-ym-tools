@@ -49,7 +49,7 @@ impl YmSequence {
     }
 
     pub fn from_ysg(name: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
-        if bytes.len() < 4 {
+        if bytes.len() < 12 {
             return Err("YSG file too small to contain header".into());
         }
 
@@ -57,8 +57,10 @@ impl YmSequence {
         let num_unique = bytes[1] as usize;
         let seq_len = bytes[2] as usize;
         let loop_pattern = bytes[3] as usize;
+        let frame_rate_hz = u32::from_le_bytes(bytes[4..8].try_into()?);
+        let master_clock_hz = u32::from_le_bytes(bytes[8..12].try_into()?);
 
-        let seq_table_start = 4;
+        let seq_table_start = 12;
         let offset_table_start = seq_table_start + seq_len;
         let pattern_data_start = offset_table_start + num_unique * 4;
 
@@ -107,12 +109,12 @@ impl YmSequence {
                 let mask = bytes[pp] as u16 | ((bytes[pp + 1] as u16) << 8);
                 pp += 2;
 
-                for reg in 0..14 {
+                for (reg, slot) in registers.iter_mut().enumerate() {
                     if (mask & (1 << reg)) != 0 {
                         if pp >= bytes.len() {
                             return Err("Unexpected EOF in YSG pattern register payload".into());
                         }
-                        registers[reg] = bytes[pp];
+                        *slot = bytes[pp];
                         pp += 1;
                     }
                 }
@@ -158,8 +160,8 @@ impl YmSequence {
         Ok(Self {
             name: name.to_string(),
             timing: TimingConfig {
-                master_clock_hz: 2_000_000,
-                frame_rate: SystemHz::Hz50,
+                master_clock_hz,
+                frame_rate: SystemHz::Custom(frame_rate_hz),
             },
             priority: 0,
             loop_start,
@@ -168,6 +170,7 @@ impl YmSequence {
     }
 
     pub fn from_ym_data(name: &str, ym_data: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+        use ym2149_common::{ChiptunePlayer, MetadataFields};
         use ym2149_ym_replayer::decompress_if_needed;
         use ym2149_ym_replayer::load_song;
         use ym2149_ym_replayer::player::PlaybackController;
@@ -191,10 +194,16 @@ impl YmSequence {
         let apply_scaling = (ratio - 1.0).abs() > 0.0001;
 
         let (mut player, summary) = load_song(ym_data)?;
-        PlaybackController::play(&mut player)?;
-
-        let total_frames = summary.frame_count as usize;
+        let total_frames = summary.frame_count;
         let samples_per_frame = summary.samples_per_frame as usize;
+
+        // Loop point is static file metadata, safe to read before `play()` advances
+        // playback state.
+        let loop_start = player
+            .metadata()
+            .loop_frame()
+            .filter(|&frame| frame < total_frames);
+        PlaybackController::play(&mut player)?;
 
         let mut frames = Vec::with_capacity(total_frames);
 
@@ -249,9 +258,17 @@ impl YmSequence {
                 frame_rate: SystemHz::Hz50,
             },
             priority: 0,
-            loop_start: None,
+            loop_start,
             frames,
         })
+    }
+
+    /// Byte length of `ym_data` after decompression (e.g. from LHA-compressed
+    /// `.ym` files), before any lokey-ym-tools recompilation. Useful for reporting
+    /// how much smaller a compiled `.ysg` is than the source register stream.
+    pub fn ym_decompressed_len(ym_data: &[u8]) -> Result<usize, Box<dyn std::error::Error>> {
+        use ym2149_ym_replayer::decompress_if_needed;
+        Ok(decompress_if_needed(ym_data)?.len())
     }
 }
 
@@ -688,7 +705,7 @@ impl SfxSequence {
     }
 
     pub fn from_yfx(name: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
-        if bytes.len() % 5 != 0 {
+        if !bytes.len().is_multiple_of(5) {
             return Err("YFX file size must be a multiple of 5".into());
         }
 

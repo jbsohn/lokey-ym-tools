@@ -1,14 +1,16 @@
 pub mod delta;
 pub mod player;
+pub mod progress;
 pub mod registers;
 pub mod sequence;
 pub mod timing;
 
-pub use delta::DeltaCompiler;
+pub use delta::{DeltaCompiler, SongCompilation};
 pub use player::AudioPlayer;
+pub use progress::with_spinner;
 pub use registers::YmRegisters;
 pub use sequence::{SfxFrame, SfxSequence, YmChannel, YmFrame, YmSequence};
-pub use timing::{SystemHz, TimingConfig};
+pub use timing::{SystemHz, TimingConfig, calculate_delay};
 
 #[cfg(test)]
 mod tests {
@@ -23,6 +25,15 @@ mod tests {
         let hz60 = SystemHz::Hz60;
         assert_eq!(hz60.hz_value(), 60);
     }
+
+    #[test]
+    fn test_calculate_delay() {
+        // Hand-computed against the same formula as a port-fidelity check:
+        // remaining = 1_789_773/hz - 1800, y = floor(remaining/1285), x = round((remaining - y*1285)/5)
+        assert_eq!(calculate_delay(50), (26, 117));
+        assert_eq!(calculate_delay(60), (21, 209));
+    }
+
 
     #[test]
     fn test_delta_compiler_basic() {
@@ -159,11 +170,13 @@ mod tests {
                 ..Default::default()
             });
         }
+        // Deliberately non-default timing (as `--step` decimation or `.ym` import would
+        // produce) to catch the format silently dropping it back to hardcoded defaults.
         let song = YmSequence {
             name: "test_song".to_string(),
             timing: TimingConfig {
-                master_clock_hz: 2_000_000,
-                frame_rate: SystemHz::Hz50,
+                master_clock_hz: 1_789_773,
+                frame_rate: SystemHz::Custom(17),
             },
             priority: 0,
             loop_start: None,
@@ -171,9 +184,11 @@ mod tests {
         };
 
         let compiler = DeltaCompiler::new();
-        let ysg_bytes = compiler.compile_song(&song);
+        let compiled = compiler.compile_song(&song);
+        let ysg_bytes = compiled.bytes;
 
-        let chosen_size = ysg_bytes[0] as usize;
+        let chosen_size = compiled.pattern_size;
+        assert_eq!(ysg_bytes[0] as usize, chosen_size);
         let seq_len = ysg_bytes[2] as usize;
 
         let decoded = YmSequence::from_ysg("test_song", &ysg_bytes).unwrap();
@@ -182,5 +197,7 @@ mod tests {
         assert_eq!(decoded.frames[0].tone_a, Some(200));
         assert_eq!(decoded.frames[0].volume_a, Some(15));
         assert_eq!(decoded.frames[69].tone_a, Some(269));
+        assert_eq!(decoded.timing.master_clock_hz, 1_789_773);
+        assert_eq!(decoded.timing.frame_rate.hz_value(), 17);
     }
 }
